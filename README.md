@@ -5,6 +5,7 @@ YukiVPN is an Android L2TP client under active development. Android 12 and newer
 ## Current milestone
 
 - Compose profile screen with Android VPN permission handling
+- Multi-profile management with add, edit, delete, and active-profile switching
 - AES-GCM credential storage backed by Android Keystore
 - Foreground `VpnService` lifecycle and explicit connection states
 - L2TPv2 control-packet codec

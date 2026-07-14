@@ -23,6 +23,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 class MainActivity : ComponentActivity() {
     private val status = MutableStateFlow(TunnelStatus.IDLE)
     private val detail = MutableStateFlow("尚未连接")
+    private val profiles = MutableStateFlow<List<VpnProfile>>(emptyList())
+    private val activeProfileId = MutableStateFlow<String?>(null)
     private lateinit var profileStore: ProfileStore
 
     private val vpnPermission = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
@@ -47,25 +49,64 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         profileStore = ProfileStore(this)
+        refreshProfiles()
         registerStatusReceiver()
         if (Build.VERSION.SDK_INT >= 33) {
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
         setContent {
             YukiVpnApp(
-                initialProfile = profileStore.load(),
+                profiles = profiles,
+                activeProfileId = activeProfileId,
                 status = status,
                 detail = detail,
                 onConnect = ::requestConnect,
                 onStop = ::stopTunnelService,
+                onSaveProfile = ::saveProfile,
+                onSelectProfile = ::selectProfile,
+                onDeleteProfile = ::deleteProfile,
             )
         }
     }
 
-    private fun requestConnect(profile: VpnProfile) {
-        profileStore.save(profile)
+    private fun requestConnect() {
+        if (profileStore.activeProfile() == null) {
+            status.value = TunnelStatus.FAILED
+            detail.value = "请先添加并选择一个配置"
+            return
+        }
         val permissionIntent = VpnService.prepare(this)
         if (permissionIntent == null) startTunnelService() else vpnPermission.launch(permissionIntent)
+    }
+
+    private fun saveProfile(profile: VpnProfile) {
+        profileStore.upsert(profile)
+        selectProfile(profile.id)
+    }
+
+    private fun selectProfile(id: String) {
+        if (activeProfileId.value != id) stopForProfileChange()
+        profileStore.select(id)
+        refreshProfiles()
+    }
+
+    private fun deleteProfile(id: String) {
+        if (activeProfileId.value == id) stopForProfileChange()
+        profileStore.delete(id)
+        refreshProfiles()
+    }
+
+    private fun stopForProfileChange() {
+        if (status.value == TunnelStatus.PROBING || status.value == TunnelStatus.CONTROL_CONNECTED) {
+            stopTunnelService()
+        }
+        status.value = TunnelStatus.IDLE
+        detail.value = "配置已切换"
+    }
+
+    private fun refreshProfiles() {
+        profiles.value = profileStore.profiles()
+        activeProfileId.value = profileStore.activeProfile()?.id
     }
 
     private fun startTunnelService() {
