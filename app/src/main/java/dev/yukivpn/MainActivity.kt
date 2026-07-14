@@ -10,6 +10,7 @@ import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import dev.yukivpn.data.ProfileStore
@@ -44,6 +45,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
         profileStore = ProfileStore(this)
         registerStatusReceiver()
         if (Build.VERSION.SDK_INT >= 33) {
@@ -92,4 +94,3 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
     }
 }
-
