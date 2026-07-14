@@ -7,6 +7,28 @@ import org.junit.Test
 
 class PppSessionMachineTest {
     @Test
+    fun `echo reply uses zero magic after local magic is rejected`() {
+        val machine = PppSessionMachine("user", "pass")
+        val request = PppControlPacket.decode(machine.start().single().payload)
+        val magic = PppOption.decodeAll(request.data).first { it.type == 5 }
+        val retried = machine.receive(
+            PppFrame(PppProtocol.LCP, PppControlPacket(4, request.id, magic.encode()).encode()),
+        )
+        val retryOptions = PppOption.decodeAll(PppControlPacket.decode(retried.single().payload).data)
+        assertTrue(retryOptions.none { it.type == 5 })
+
+        val echo = machine.receive(
+            PppFrame(
+                PppProtocol.LCP,
+                PppControlPacket(9, 44, byteArrayOf(1, 2, 3, 4, 9, 8)).encode(),
+            ),
+        )
+        val reply = PppControlPacket.decode(echo.single().payload)
+
+        assertEquals(10, reply.code)
+        assertArrayEquals(byteArrayOf(0, 0, 0, 0, 9, 8), reply.data)
+    }
+    @Test
     fun `PPP frame round trips with address and control fields`() {
         val frame = PppFrame(PppProtocol.IPV4, byteArrayOf(0x45, 0, 0, 20))
         val decoded = PppFrame.decode(frame.encode())

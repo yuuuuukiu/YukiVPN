@@ -92,11 +92,13 @@ data class L2tpPacket(
 
 object AvpType {
     const val MESSAGE_TYPE = 0
+    const val RESULT_CODE = 1
     const val PROTOCOL_VERSION = 2
     const val FRAMING_CAPABILITIES = 3
     const val HOST_NAME = 7
     const val ASSIGNED_TUNNEL_ID = 9
     const val RECEIVE_WINDOW_SIZE = 10
+    const val CAUSE_CODE = 12
     const val ASSIGNED_SESSION_ID = 14
     const val CALL_SERIAL_NUMBER = 15
     const val FRAMING_TYPE = 19

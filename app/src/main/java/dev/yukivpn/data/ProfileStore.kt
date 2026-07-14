@@ -39,7 +39,11 @@ class ProfileStore(context: Context) {
 
     @Synchronized
     fun upsert(profile: VpnProfile): List<VpnProfile> {
-        val normalized = profile.copy(name = profile.name.trim(), server = profile.server.trim())
+        val normalized = profile.copy(
+            name = profile.name.trim(),
+            server = profile.server.trim(),
+            dnsServers = profile.dnsServers.map(String::trim).filter(String::isNotEmpty).distinct(),
+        )
         val profiles = profiles().toMutableList()
         val index = profiles.indexOfFirst { it.id == normalized.id }
         if (index >= 0) profiles[index] = normalized else profiles += normalized
@@ -73,39 +77,54 @@ class ProfileStore(context: Context) {
                 JSONObject()
                     .put("id", profile.id)
                     .put("name", profile.name)
+                    .put("protocol", profile.protocol.name)
                     .put("server", profile.server)
                     .put("port", profile.port)
                     .put("username", encrypt(profile.username))
                     .put("password", encrypt(profile.password))
-                    .put("psk", encrypt(profile.preSharedKey)),
+                    .put("psk", encrypt(profile.preSharedKey))
+                    .put("dns", JSONArray(profile.dnsServers)),
             )
         }
         prefs.edit().putString(KEY_PROFILES, array.toString()).apply()
     }
 
-    private fun JSONObject.toProfile() = VpnProfile(
-        server = optString("server"),
-        username = decrypt(optString("username")),
-        password = decrypt(optString("password")),
-        preSharedKey = decrypt(optString("psk")),
-        port = optInt("port", 1701),
-        id = getString("id"),
-        name = optString("name", "未命名配置"),
-    )
+    private fun JSONObject.toProfile(): VpnProfile {
+        val psk = decrypt(optString("psk"))
+        val protocol = runCatching { VpnProtocol.valueOf(optString("protocol")) }.getOrElse {
+            if (psk.isBlank()) VpnProtocol.L2TP else VpnProtocol.L2TP_IPSEC_PSK
+        }
+        return VpnProfile(
+            server = optString("server"),
+            username = decrypt(optString("username")),
+            password = decrypt(optString("password")),
+            preSharedKey = psk,
+            port = optInt("port", 1701),
+            id = getString("id"),
+            name = optString("name", "未命名配置"),
+            protocol = protocol,
+            dnsServers = optJSONArray("dns")?.let { array ->
+                buildList { repeat(array.length()) { add(array.optString(it)) } }
+                    .filter(String::isNotEmpty)
+            }.orEmpty(),
+        )
+    }
 
     private fun migrateLegacyProfile(): List<VpnProfile> {
         val server = prefs.getString(LEGACY_SERVER, "").orEmpty()
         val migrated = if (server.isBlank()) {
             emptyList()
         } else {
+            val psk = decrypt(prefs.getString(LEGACY_PSK, null))
             listOf(
                 VpnProfile(
                     server = server,
                     username = decrypt(prefs.getString(LEGACY_USERNAME, null)),
                     password = decrypt(prefs.getString(LEGACY_PASSWORD, null)),
-                    preSharedKey = decrypt(prefs.getString(LEGACY_PSK, null)),
+                    preSharedKey = psk,
                     port = prefs.getInt(LEGACY_PORT, 1701),
                     name = server,
+                    protocol = if (psk.isBlank()) VpnProtocol.L2TP else VpnProtocol.L2TP_IPSEC_PSK,
                 ),
             )
         }

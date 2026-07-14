@@ -1,34 +1,27 @@
 # YukiVPN
 
-YukiVPN is an Android L2TP client under active development. Android 12 and newer no longer expose the legacy L2TP/IPsec client in AOSP, so this project owns the client lifecycle through `VpnService`.
+YukiVPN是一个新世代的L2TP客户端，支持Android 12+连接L2TP及L2TP/IPsec服务。计划支持HarmonyOS，Windows，MacOS，Linux等平台。
 
-## Current milestone
+## 为什么写YukiVPN
 
-- Compose profile screen with Android VPN permission handling
-- Multi-profile management with add, edit, delete, and active-profile switching
-- AES-GCM credential storage backed by Android Keystore
-- Foreground `VpnService` lifecycle and explicit connection states
-- L2TPv2 tunnel and incoming-call session negotiation with retransmission
-- PPP LCP plus PAP, CHAP-MD5, and MS-CHAPv2 authentication
-- IPCP IPv4 and DNS negotiation
-- Android TUN creation and bidirectional IPv4 packet forwarding
-- JVM tests for protocol encoding and malformed packets
+Android 12及以上版本已移除对L2TP/IPsec的支持，导致用户无法通过Android设备连接L2TP/IPsec服务。我也尝试过其他L2TP Client，要么是功能有限，界面不友好，要么是根本连接不上，YukiVPN旨在填补这一空白，提供一个现代的L2TP/IPsec连接解决方案。
 
-The current build can establish a plaintext L2TP/PPP IPv4 tunnel. It deliberately refuses to connect a profile containing a pre-shared key until IKE/IPsec transport protection is implemented, preventing silent credential downgrade. Plaintext mode is intended for controlled interoperability testing, not untrusted networks.
+## 如何使用
 
-## Build
+安装release版本后，打开YukiVPN，在配置页选择协议，添加配置，在主页点击连接即可。
 
-Use JDK 17 and Android SDK 35:
+## 特性
 
-```powershell
-./gradlew.bat test assembleDebug
-```
++ 支持Android 12+连接L2TP及L2TP/IPsec服务
++ 支持HarmonyOS，Windows，MacOS，Linux等平台
++ 界面友好，操作简单
++ 支持多种协议，包括L2TP，L2TP/IPsec
 
-## Roadmap
+## 计划实现
 
-1. IKEv1 Main/Aggressive Mode and IPsec transport mode, or a maintained native IPsec engine
-2. L2TP teardown, keepalive timers, and reconnect policy
-3. IPv6CP, diagnostics export, and broader interoperability tests
-4. Multi-tunnel flow scheduling for concurrent connections
-
-Only modern cryptographic suites should be enabled by default. Compatibility algorithms such as 3DES and SHA-1 need an explicit per-profile opt-in and a visible warning.
++ 支持HarmonyOS
++ 支持Windows
++ 支持MacOS
++ 支持Linux
++ 支持SSTP协议
++ 支持Cisco IPsec

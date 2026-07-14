@@ -1,5 +1,6 @@
 package dev.yukivpn.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -15,12 +16,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
@@ -28,9 +31,13 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.NotificationsOff
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
@@ -51,8 +58,13 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
@@ -64,6 +76,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -71,11 +84,21 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import dev.yukivpn.data.VpnProfile
+import dev.yukivpn.data.VpnProtocol
+import dev.yukivpn.BuildConfig
+import dev.yukivpn.R
+import dev.yukivpn.data.isValidIpv4Address
+import dev.yukivpn.data.parseDnsServers
+import dev.yukivpn.logging.LogEntry
+import dev.yukivpn.logging.LogLevel
 import dev.yukivpn.ui.theme.YukiVpnTheme
 import dev.yukivpn.vpn.TunnelStatus
 import kotlinx.coroutines.flow.StateFlow
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
-private enum class AppPage { OVERVIEW, PROFILES }
+private enum class AppPage { OVERVIEW, PROFILES, LOGS, SETTINGS, ABOUT }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -84,21 +107,34 @@ fun YukiVpnApp(
     activeProfileId: StateFlow<String?>,
     status: StateFlow<TunnelStatus>,
     detail: StateFlow<String>,
+    logs: StateFlow<List<LogEntry>>,
+    blockCaptivePortalNotifications: StateFlow<Boolean>,
+    notificationListenerGranted: StateFlow<Boolean>,
     onConnect: () -> Unit,
     onStop: () -> Unit,
     onSaveProfile: (VpnProfile) -> Unit,
     onSelectProfile: (String) -> Unit,
     onDeleteProfile: (String) -> Unit,
+    onClearLogs: () -> Unit,
+    onSetCaptivePortalBlocking: (Boolean) -> Unit,
+    onOpenNotificationAccess: () -> Unit,
 ) {
     val profileList by profiles.collectAsState()
     val activeId by activeProfileId.collectAsState()
     val tunnelStatus by status.collectAsState()
     val statusDetail by detail.collectAsState()
+    val logEntries by logs.collectAsState()
+    val captivePortalBlocking by blockCaptivePortalNotifications.collectAsState()
+    val listenerGranted by notificationListenerGranted.collectAsState()
     val activeProfile = profileList.firstOrNull { it.id == activeId }
     var page by remember { mutableStateOf(AppPage.OVERVIEW) }
     var editingProfile by remember { mutableStateOf<VpnProfile?>(null) }
     var showEditor by remember { mutableStateOf(false) }
     var deletingProfile by remember { mutableStateOf<VpnProfile?>(null) }
+
+    BackHandler(enabled = page == AppPage.SETTINGS || page == AppPage.ABOUT) {
+        page = AppPage.OVERVIEW
+    }
 
     YukiVpnTheme {
         Scaffold(
@@ -107,7 +143,13 @@ fun YukiVpnApp(
                 CenterAlignedTopAppBar(
                     title = {
                         Text(
-                            if (page == AppPage.OVERVIEW) "YukiVPN" else "配置文件",
+                            when (page) {
+                                AppPage.OVERVIEW -> "YukiVPN"
+                                AppPage.PROFILES -> "配置文件"
+                                AppPage.LOGS -> "日志"
+                                AppPage.SETTINGS -> "设置"
+                                AppPage.ABOUT -> "关于"
+                            },
                             style = MaterialTheme.typography.titleLarge,
                             fontWeight = FontWeight.SemiBold,
                         )
@@ -115,10 +157,31 @@ fun YukiVpnApp(
                     colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
                         containerColor = MaterialTheme.colorScheme.surface,
                     ),
+                    navigationIcon = {
+                        if (page == AppPage.SETTINGS || page == AppPage.ABOUT) {
+                            IconButton(onClick = { page = AppPage.OVERVIEW }) {
+                                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                            }
+                        }
+                    },
+                    actions = {
+                        when (page) {
+                            AppPage.OVERVIEW -> IconButton(onClick = { page = AppPage.ABOUT }) {
+                                Icon(Icons.Default.Info, contentDescription = "关于")
+                            }
+                            AppPage.PROFILES -> IconButton(onClick = { page = AppPage.SETTINGS }) {
+                                Icon(Icons.Default.Settings, contentDescription = "设置")
+                            }
+                            AppPage.LOGS -> IconButton(onClick = onClearLogs) {
+                                Icon(Icons.Default.Delete, contentDescription = "清空日志")
+                            }
+                            AppPage.SETTINGS, AppPage.ABOUT -> Unit
+                        }
+                    },
                 )
             },
             bottomBar = {
-                NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainer) {
+                if (page != AppPage.SETTINGS && page != AppPage.ABOUT) NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainer) {
                     NavigationBarItem(
                         selected = page == AppPage.OVERVIEW,
                         onClick = { page = AppPage.OVERVIEW },
@@ -130,6 +193,12 @@ fun YukiVpnApp(
                         onClick = { page = AppPage.PROFILES },
                         icon = { Icon(Icons.Default.Description, contentDescription = null) },
                         label = { Text("配置") },
+                    )
+                    NavigationBarItem(
+                        selected = page == AppPage.LOGS,
+                        onClick = { page = AppPage.LOGS },
+                        icon = { Icon(Icons.Default.Terminal, contentDescription = null) },
+                        label = { Text("日志") },
                     )
                 }
             },
@@ -167,6 +236,20 @@ fun YukiVpnApp(
                         onAdd = { editingProfile = null; showEditor = true },
                         modifier = Modifier.widthIn(max = 680.dp).fillMaxWidth(),
                     )
+                    AppPage.LOGS -> LogsScreen(
+                        entries = logEntries,
+                        modifier = Modifier.widthIn(max = 840.dp).fillMaxWidth(),
+                    )
+                    AppPage.SETTINGS -> SettingsScreen(
+                        blockCaptivePortalNotifications = captivePortalBlocking,
+                        notificationListenerGranted = listenerGranted,
+                        onSetCaptivePortalBlocking = onSetCaptivePortalBlocking,
+                        onOpenNotificationAccess = onOpenNotificationAccess,
+                        modifier = Modifier.widthIn(max = 680.dp).fillMaxWidth(),
+                    )
+                    AppPage.ABOUT -> AboutScreen(
+                        modifier = Modifier.widthIn(max = 680.dp).fillMaxWidth(),
+                    )
                 }
             }
         }
@@ -194,6 +277,158 @@ fun YukiVpnApp(
                 },
                 dismissButton = { TextButton(onClick = { deletingProfile = null }) { Text("取消") } },
             )
+        }
+    }
+}
+
+@Composable
+private fun AboutScreen(modifier: Modifier = Modifier) {
+    Column(
+        modifier = modifier.fillMaxSize().padding(horizontal = 24.dp, vertical = 48.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        androidx.compose.foundation.Image(
+            painter = painterResource(R.drawable.ic_launcher),
+            contentDescription = null,
+            modifier = Modifier.size(88.dp),
+        )
+        Text("YukiVPN", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
+        Text(
+            "版本 ${BuildConfig.VERSION_NAME}",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            "L2TP 与 L2TP/IPsec PSK 客户端",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+private fun SettingsScreen(
+    blockCaptivePortalNotifications: Boolean,
+    notificationListenerGranted: Boolean,
+    onSetCaptivePortalBlocking: (Boolean) -> Unit,
+    onOpenNotificationAccess: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier.fillMaxSize().padding(horizontal = 20.dp, vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text("通知", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                Icons.Default.NotificationsOff,
+                contentDescription = null,
+                modifier = Modifier.size(28.dp),
+                tint = MaterialTheme.colorScheme.primary,
+            )
+            Column(modifier = Modifier.padding(horizontal = 16.dp).weight(1f)) {
+                Text("屏蔽 Wi-Fi 等待认证通知", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    if (notificationListenerGranted) "通知使用权已授予" else "需要通知使用权",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Switch(
+                checked = blockCaptivePortalNotifications,
+                onCheckedChange = onSetCaptivePortalBlocking,
+            )
+        }
+        if (!notificationListenerGranted) {
+            OutlinedButton(onClick = onOpenNotificationAccess, modifier = Modifier.fillMaxWidth()) {
+                Text("授予通知使用权")
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun LogsScreen(entries: List<LogEntry>, modifier: Modifier = Modifier) {
+    var level by remember { mutableStateOf(LogLevel.INFO) }
+    val filtered = remember(entries, level) {
+        entries.filter { it.level.priority <= level.priority }.asReversed()
+    }
+    val formatter = remember { SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()) }
+    Column(modifier = modifier.fillMaxSize().padding(horizontal = 16.dp)) {
+        SingleChoiceSegmentedButtonRow(
+            modifier = Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 10.dp),
+        ) {
+            LogLevel.entries.forEachIndexed { index, option ->
+                SegmentedButton(
+                    selected = level == option,
+                    onClick = { level = option },
+                    shape = SegmentedButtonDefaults.itemShape(index, LogLevel.entries.size),
+                ) {
+                    Text(
+                        when (option) {
+                            LogLevel.ERROR -> "错误"
+                            LogLevel.INFO -> "信息"
+                            LogLevel.DEBUG -> "调试"
+                        },
+                    )
+                }
+            }
+        }
+        if (filtered.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Icon(
+                    Icons.Default.Terminal,
+                    contentDescription = null,
+                    modifier = Modifier.size(40.dp),
+                    tint = MaterialTheme.colorScheme.outline,
+                )
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 20.dp),
+            ) {
+                items(filtered, key = { it.id }) { entry ->
+                    LogRow(entry, formatter)
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LogRow(entry: LogEntry, formatter: SimpleDateFormat) {
+    val levelColor = when (entry.level) {
+        LogLevel.ERROR -> MaterialTheme.colorScheme.error
+        LogLevel.INFO -> MaterialTheme.colorScheme.primary
+        LogLevel.DEBUG -> MaterialTheme.colorScheme.outline
+    }
+    SelectionContainer {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    formatter.format(Date(entry.timestamp)),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    entry.level.name,
+                    modifier = Modifier.padding(start = 10.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = levelColor,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+            Text(entry.message, style = MaterialTheme.typography.bodySmall)
         }
     }
 }
@@ -268,7 +503,11 @@ private fun OverviewScreen(
             shape = RoundedCornerShape(8.dp),
         ) {
             Text(
-                "已支持明文 L2TP + PPP 数据隧道。填写 PSK 的配置会等待 IPsec 支持，绝不会自动降级为明文。",
+                when (profile?.protocol) {
+                    VpnProtocol.L2TP -> "当前配置使用 L2TP + PPP 数据隧道。"
+                    VpnProtocol.L2TP_IPSEC_PSK -> "当前配置使用 IKEv1 PSK、ESP NAT-T transport 和 L2TP + PPP 数据隧道。"
+                    null -> "添加配置并选择连接协议。"
+                },
                 modifier = Modifier.padding(14.dp),
                 style = MaterialTheme.typography.bodySmall,
             )
@@ -300,7 +539,7 @@ private fun ActiveProfileCard(profile: VpnProfile, onClick: () -> Unit) {
             Column(modifier = Modifier.padding(start = 14.dp).weight(1f)) {
                 Text(profile.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                 Text(
-                    "${profile.server}:${profile.port}",
+                    "${protocolLabel(profile.protocol)} · ${profile.server}:${profile.port}",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSecondaryContainer,
                 )
@@ -392,7 +631,7 @@ private fun ProfileListItem(
             Column(modifier = Modifier.padding(horizontal = 14.dp).weight(1f)) {
                 Text(profile.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium)
                 Text(
-                    "${profile.server}:${profile.port}",
+                    "${protocolLabel(profile.protocol)} · ${profile.server}:${profile.port}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -443,6 +682,7 @@ private fun EmptyProfiles(onAdd: () -> Unit) {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ProfileEditorDialog(
     profile: VpnProfile?,
@@ -456,6 +696,8 @@ private fun ProfileEditorDialog(
     var username by remember(draft.id) { mutableStateOf(draft.username) }
     var password by remember(draft.id) { mutableStateOf(draft.password) }
     var psk by remember(draft.id) { mutableStateOf(draft.preSharedKey) }
+    var dns by remember(draft.id) { mutableStateOf(draft.dnsServers.joinToString(", ")) }
+    var protocol by remember(draft.id) { mutableStateOf(draft.protocol) }
     var passwordVisible by remember(draft.id) { mutableStateOf(false) }
     var pskVisible by remember(draft.id) { mutableStateOf(false) }
     var validation by remember(draft.id) { mutableStateOf<String?>(null) }
@@ -469,6 +711,17 @@ private fun ProfileEditorDialog(
                 modifier = Modifier.fillMaxWidth().heightIn(max = 500.dp).verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
+                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                    VpnProtocol.entries.forEachIndexed { index, option ->
+                        SegmentedButton(
+                            selected = protocol == option,
+                            onClick = { protocol = option; validation = null },
+                            shape = SegmentedButtonDefaults.itemShape(index, VpnProtocol.entries.size),
+                        ) {
+                            Text(if (option == VpnProtocol.L2TP) "L2TP" else "L2TP/IPsec")
+                        }
+                    }
+                }
                 OutlinedTextField(
                     value = name,
                     onValueChange = { name = it; validation = null },
@@ -509,7 +762,20 @@ private fun ProfileEditorDialog(
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
                 )
                 SecretField("密码", password, passwordVisible, { password = it }, { passwordVisible = !passwordVisible })
-                SecretField("IPsec 预共享密钥（开发中）", psk, pskVisible, { psk = it }, { pskVisible = !pskVisible })
+                if (protocol == VpnProtocol.L2TP_IPSEC_PSK) {
+                    SecretField("IPsec 预共享密钥", psk, pskVisible, { psk = it }, { pskVisible = !pskVisible })
+                }
+                HorizontalDivider()
+                OutlinedTextField(
+                    value = dns,
+                    onValueChange = { dns = it; validation = null },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("自定义 DNS（可选）") },
+                    placeholder = { Text("1.1.1.1, 8.8.8.8") },
+                    singleLine = true,
+                    shape = RoundedCornerShape(8.dp),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done),
+                )
                 validation?.let {
                     Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                 }
@@ -519,12 +785,15 @@ private fun ProfileEditorDialog(
             TextButton(
                 onClick = {
                     val parsedPort = port.toIntOrNull()
+                    val parsedDns = parseDnsServers(dns)
                     validation = when {
                         name.isBlank() -> "请输入配置名称"
                         server.isBlank() -> "请输入服务器地址"
                         parsedPort == null || parsedPort !in 1..65535 -> "请输入有效端口"
                         username.isBlank() -> "请输入用户名"
                         password.isBlank() -> "请输入密码"
+                        protocol == VpnProtocol.L2TP_IPSEC_PSK && psk.isBlank() -> "请输入 IPsec 预共享密钥"
+                        parsedDns.any { !isValidIpv4Address(it) } -> "请输入有效的 IPv4 DNS 地址"
                         else -> null
                     }
                     if (validation == null) {
@@ -536,6 +805,8 @@ private fun ProfileEditorDialog(
                                 username = username,
                                 password = password,
                                 preSharedKey = psk,
+                                protocol = protocol,
+                                dnsServers = parsedDns,
                             ),
                         )
                     }
@@ -544,6 +815,11 @@ private fun ProfileEditorDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
+}
+
+private fun protocolLabel(protocol: VpnProtocol) = when (protocol) {
+    VpnProtocol.L2TP -> "L2TP"
+    VpnProtocol.L2TP_IPSEC_PSK -> "L2TP/IPsec PSK"
 }
 
 @Composable

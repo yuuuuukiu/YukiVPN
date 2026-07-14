@@ -13,6 +13,7 @@ class PppSessionMachine(
     private val username: String,
     private val password: String,
     private val random: SecureRandom = SecureRandom(),
+    private val event: (String) -> Unit = {},
 ) {
     enum class State { INITIAL, LCP, AUTHENTICATING, IPCP, OPEN, FAILED }
     enum class Authentication { NONE, PAP, CHAP_MD5, MSCHAP_V2 }
@@ -33,21 +34,30 @@ class PppSessionMachine(
     private var localIpcpId = 0
     private var localIpcpAcked = false
     private var peerIpcpAcked = false
+    private val localLcpOptions = mutableListOf<PppOption>()
+    private var lcpOptionsInitialized = false
+    private var requestPrimaryDns = true
+    private var requestSecondaryDns = true
     private var address = "0.0.0.0"
     private val dns = linkedSetOf<String>()
 
     fun start(): List<PppFrame> {
         check(state == State.INITIAL)
         state = State.LCP
+        event("PPP 开始 LCP 协商")
         return listOf(lcpRequest())
     }
 
-    fun receive(frame: PppFrame): List<PppFrame> = when (frame.protocol) {
+    fun receive(frame: PppFrame): List<PppFrame> {
+        val control = runCatching { PppControlPacket.decode(frame.payload) }.getOrNull()
+        event("PPP RX ${protocolName(frame.protocol)}${control?.let { " code=${it.code} id=${it.id}" }.orEmpty()} state=$state")
+        return when (frame.protocol) {
         PppProtocol.LCP -> receiveLcp(PppControlPacket.decode(frame.payload))
         PppProtocol.PAP -> receivePap(PppControlPacket.decode(frame.payload))
         PppProtocol.CHAP -> receiveChap(PppControlPacket.decode(frame.payload))
         PppProtocol.IPCP -> receiveIpcp(PppControlPacket.decode(frame.payload))
         else -> emptyList()
+        }
     }
 
     private fun receiveLcp(packet: PppControlPacket): List<PppFrame> {
@@ -57,7 +67,7 @@ class PppSessionMachine(
         }
         if (state != State.LCP) {
             return if (packet.code == ECHO_REQUEST) {
-                listOf(control(PppProtocol.LCP, ECHO_REPLY, packet.id, packet.data))
+                listOf(control(PppProtocol.LCP, ECHO_REPLY, packet.id, echoReplyData(packet.data)))
             } else emptyList()
         }
         return when (packet.code) {
@@ -66,11 +76,18 @@ class PppSessionMachine(
                 if (packet.id == localLcpId) localLcpAcked = true
                 advanceAfterLcp()
             }
-            CONFIGURE_NAK, CONFIGURE_REJECT -> {
+            CONFIGURE_NAK -> {
+                applyLcpNak(packet.data)
                 localLcpAcked = false
                 listOf(lcpRequest())
             }
-            ECHO_REQUEST -> listOf(control(PppProtocol.LCP, ECHO_REPLY, packet.id, packet.data))
+            CONFIGURE_REJECT -> {
+                val rejectedTypes = PppOption.decodeAll(packet.data).map { it.type }.toSet()
+                localLcpOptions.removeAll { it.type in rejectedTypes }
+                localLcpAcked = false
+                listOf(lcpRequest())
+            }
+            ECHO_REQUEST -> listOf(control(PppProtocol.LCP, ECHO_REPLY, packet.id, echoReplyData(packet.data)))
             else -> emptyList()
         }
     }
@@ -95,6 +112,7 @@ class PppSessionMachine(
             )
         }
         authentication = requestedAuth
+        event("PPP 对端要求认证方式 $authentication")
         peerLcpAcked = true
         val output = mutableListOf(control(PppProtocol.LCP, CONFIGURE_ACK, packet.id, packet.data))
         output += advanceAfterLcp()
@@ -164,8 +182,14 @@ class PppSessionMachine(
                 listOf(ipcpRequest())
             }
             CONFIGURE_REJECT -> {
-                PppOption.decodeAll(packet.data).forEach { if (it.type == IPCP_PRIMARY_DNS || it.type == IPCP_SECONDARY_DNS) dns.clear() }
-                listOf(ipcpRequest())
+                PppOption.decodeAll(packet.data).forEach {
+                    when (it.type) {
+                        IPCP_PRIMARY_DNS -> requestPrimaryDns = false
+                        IPCP_SECONDARY_DNS -> requestSecondaryDns = false
+                        IPCP_ADDRESS -> state = State.FAILED
+                    }
+                }
+                if (state == State.FAILED) emptyList() else listOf(ipcpRequest())
             }
             else -> emptyList()
         }
@@ -175,19 +199,38 @@ class PppSessionMachine(
         if (localIpcpAcked && peerIpcpAcked && address != "0.0.0.0") {
             networkConfig = NetworkConfig(address, dns.filter { it != "0.0.0.0" })
             state = State.OPEN
+            event("PPP IPCP 已完成，地址 $address，DNS ${networkConfig?.dnsServers.orEmpty().joinToString()}")
         }
     }
 
     private fun lcpRequest(): PppFrame {
         localLcpId = allocateId()
-        val magic = ByteArray(4).also(random::nextBytes)
-        val options = listOf(
-            PppOption(LCP_MRU, shortBytes(1400)),
-            PppOption(LCP_MAGIC, magic),
-            PppOption(LCP_PFC, byteArrayOf()),
-            PppOption(LCP_ACFC, byteArrayOf()),
-        )
-        return control(PppProtocol.LCP, CONFIGURE_REQUEST, localLcpId, options.flatMapBytes { it.encode() })
+        if (!lcpOptionsInitialized) {
+            lcpOptionsInitialized = true
+            localLcpOptions += PppOption(LCP_MRU, shortBytes(1400))
+            localLcpOptions += PppOption(LCP_MAGIC, ByteArray(4).also(random::nextBytes))
+        }
+        return control(PppProtocol.LCP, CONFIGURE_REQUEST, localLcpId, localLcpOptions.flatMapBytes { it.encode() })
+    }
+
+    private fun applyLcpNak(data: ByteArray) {
+        PppOption.decodeAll(data).forEach { suggested ->
+            val index = localLcpOptions.indexOfFirst { it.type == suggested.type }
+            when (suggested.type) {
+                LCP_MRU -> if (suggested.value.size == 2 && index >= 0) localLcpOptions[index] = suggested
+                LCP_MAGIC -> if (index >= 0) {
+                    localLcpOptions[index] = PppOption(LCP_MAGIC, ByteArray(4).also(random::nextBytes))
+                }
+            }
+        }
+    }
+
+    private fun echoReplyData(requestData: ByteArray): ByteArray {
+        val localMagic = localLcpOptions.firstOrNull { it.type == LCP_MAGIC }
+            ?.value
+            ?.takeIf { it.size == 4 }
+            ?: ByteArray(4)
+        return localMagic + requestData.drop(4).toByteArray()
     }
 
     private fun papRequest(): PppFrame {
@@ -206,11 +249,16 @@ class PppSessionMachine(
         localIpcpId = allocateId()
         val options = mutableListOf(PppOption(IPCP_ADDRESS, ipv4Bytes(address)))
         if (dns.isEmpty()) {
-            options += PppOption(IPCP_PRIMARY_DNS, ipv4Bytes("0.0.0.0"))
-            options += PppOption(IPCP_SECONDARY_DNS, ipv4Bytes("0.0.0.0"))
+            if (requestPrimaryDns) options += PppOption(IPCP_PRIMARY_DNS, ipv4Bytes("0.0.0.0"))
+            if (requestSecondaryDns) options += PppOption(IPCP_SECONDARY_DNS, ipv4Bytes("0.0.0.0"))
         } else {
             dns.forEachIndexed { index, value ->
-                options += PppOption(if (index == 0) IPCP_PRIMARY_DNS else IPCP_SECONDARY_DNS, ipv4Bytes(value))
+                val type = if (index == 0) IPCP_PRIMARY_DNS else IPCP_SECONDARY_DNS
+                if ((type == IPCP_PRIMARY_DNS && requestPrimaryDns) ||
+                    (type == IPCP_SECONDARY_DNS && requestSecondaryDns)
+                ) {
+                    options += PppOption(type, ipv4Bytes(value))
+                }
             }
         }
         return control(PppProtocol.IPCP, CONFIGURE_REQUEST, localIpcpId, options.flatMapBytes { it.encode() })
@@ -260,8 +308,19 @@ class PppSessionMachine(
         return control(PppProtocol.CHAP, CHAP_RESPONSE, packet.id, byteArrayOf(digest.size.toByte()) + digest + user)
     }
 
-    private fun control(protocol: Int, code: Int, id: Int, data: ByteArray) =
-        PppFrame(protocol, PppControlPacket(code, id, data).encode())
+    private fun control(protocol: Int, code: Int, id: Int, data: ByteArray): PppFrame {
+        event("PPP TX ${protocolName(protocol)} code=$code id=$id state=$state")
+        return PppFrame(protocol, PppControlPacket(code, id, data).encode())
+    }
+
+    private fun protocolName(protocol: Int) = when (protocol) {
+        PppProtocol.LCP -> "LCP"
+        PppProtocol.PAP -> "PAP"
+        PppProtocol.CHAP -> "CHAP"
+        PppProtocol.IPCP -> "IPCP"
+        PppProtocol.IPV4 -> "IPv4"
+        else -> "0x${protocol.toString(16)}"
+    }
 
     private fun allocateId() = nextId.also { nextId = (nextId + 1) and 0xff }
 

@@ -11,12 +11,19 @@ import androidx.core.app.NotificationCompat
 import dev.yukivpn.MainActivity
 import dev.yukivpn.R
 import dev.yukivpn.data.ProfileStore
+import dev.yukivpn.data.VpnProfile
+import dev.yukivpn.data.VpnProtocol
+import dev.yukivpn.logging.AppLogger
 import dev.yukivpn.protocol.l2tp.L2tpConnection
+import dev.yukivpn.protocol.ipsec.EspL2tpTransport
+import dev.yukivpn.protocol.ipsec.IkeQuickMode
+import dev.yukivpn.protocol.ipsec.IkeV1PskClient
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicReference
 
 class YukiVpnService : VpnService() {
     private val executor = Executors.newSingleThreadExecutor()
@@ -32,6 +39,7 @@ class YukiVpnService : VpnService() {
 
     override fun onCreate() {
         super.onCreate()
+        AppLogger.initialize(this)
         createNotificationChannel()
     }
 
@@ -54,11 +62,8 @@ class YukiVpnService : VpnService() {
     private fun runTunnel() {
         val profile = ProfileStore(this).load()
         try {
-            check(profile.preSharedKey.isBlank()) {
-                "此配置要求 IPsec PSK；为防止凭据明文降级，当前版本已拒绝连接"
-            }
-            publish(TunnelStatus.PROBING, "正在建立 L2TP 隧道与呼叫会话")
-            val activeConnection = L2tpConnection.connect(profile.server, profile.port, ::protect)
+            AppLogger.debug("开始连接 ${profile.server}:${profile.port}，协议 ${profile.protocol.name}")
+            val activeConnection = connectTransport(profile)
             connection = activeConnection
             publish(
                 TunnelStatus.CONTROL_CONNECTED,
@@ -66,39 +71,65 @@ class YukiVpnService : VpnService() {
             )
 
             publish(TunnelStatus.AUTHENTICATING, "正在协商 PPP 并验证身份")
-            val network = activeConnection.negotiatePpp(profile.username, profile.password)
+            val network = activeConnection.negotiatePpp(profile.username, profile.password, AppLogger::debug)
+            val dnsServers = profile.dnsServers.ifEmpty { network.dnsServers }
+            if (profile.dnsServers.isNotEmpty()) {
+                AppLogger.debug("使用配置指定的 DNS ${dnsServers.joinToString()}")
+            }
             val builder = Builder()
                 .setSession(profile.name)
                 .setMtu(MTU)
                 .setBlocking(true)
                 .addAddress(network.address, 32)
                 .addRoute("0.0.0.0", 0)
-            network.dnsServers.forEach(builder::addDnsServer)
+            dnsServers.forEach(builder::addDnsServer)
             val tun = checkNotNull(builder.establish()) { "Android 未能建立 TUN 接口" }
             tunnelInterface = tun
 
             val connectedText = buildString {
                 append("已连接 · ")
                 append(network.address)
-                if (network.dnsServers.isNotEmpty()) append(" · DNS ${network.dnsServers.joinToString()}")
+                if (dnsServers.isNotEmpty()) append(" · DNS ${dnsServers.joinToString()}")
             }
             publish(TunnelStatus.CONNECTED, connectedText)
             updateNotification(connectedText)
             bridgePackets(activeConnection, tun)
-        } catch (_: SocketTimeoutException) {
-            if (!stopRequested) fail("服务器在协议协商期间超时")
-        } catch (_: SocketException) {
-            if (!stopRequested) fail("L2TP 网络连接已中断")
+        } catch (error: SocketTimeoutException) {
+            if (!stopRequested) fail("服务器在协议协商期间超时", error)
+        } catch (error: SocketException) {
+            if (!stopRequested) fail("L2TP 网络连接已中断", error)
         } catch (error: Exception) {
-            if (!stopRequested) fail(error.message ?: "VPN 连接失败")
+            if (!stopRequested) fail(error.message ?: "VPN 连接失败", error)
         } finally {
             shutdownTunnel()
+        }
+    }
+
+    private fun connectTransport(profile: VpnProfile): L2tpConnection = when (profile.protocol) {
+        VpnProtocol.L2TP -> {
+            publish(TunnelStatus.PROBING, "正在建立 L2TP 隧道与呼叫会话")
+            L2tpConnection.connect(profile.server, profile.port, ::protect)
+        }
+        VpnProtocol.L2TP_IPSEC_PSK -> {
+            publish(TunnelStatus.PROBING, "正在协商 IKEv1/IPsec PSK")
+            val phase1 = IkeV1PskClient(::protect, event = AppLogger::debug)
+                .negotiate(profile.server, profile.preSharedKey)
+            try {
+                publish(TunnelStatus.PROBING, "正在建立 IPsec ESP transport SA")
+                val securityAssociations = IkeQuickMode(event = AppLogger::debug).negotiate(phase1)
+                publish(TunnelStatus.PROBING, "正在通过 IPsec 建立 L2TP 会话")
+                L2tpConnection.connect(EspL2tpTransport(phase1, securityAssociations))
+            } catch (error: Exception) {
+                phase1.close()
+                throw error
+            }
         }
     }
 
     private fun bridgePackets(activeConnection: L2tpConnection, tun: ParcelFileDescriptor) {
         val input = FileInputStream(tun.fileDescriptor)
         val output = FileOutputStream(tun.fileDescriptor)
+        val uplinkFailure = AtomicReference<Exception?>()
         val uplink = Thread({
             val packet = ByteArray(MAX_IP_PACKET_SIZE)
             try {
@@ -107,14 +138,21 @@ class YukiVpnService : VpnService() {
                     if (length <= 0) break
                     activeConnection.sendIpv4(packet, length)
                 }
-            } catch (_: Exception) {
-                if (!stopRequested) activeConnection.close()
+            } catch (error: Exception) {
+                if (!stopRequested) {
+                    uplinkFailure.compareAndSet(null, error)
+                    activeConnection.close()
+                }
             }
         }, "YukiVPN-uplink").apply { start() }
 
         try {
             while (!stopRequested) {
-                val packet = activeConnection.receiveIpv4()
+                val packet = try {
+                    activeConnection.receiveIpv4()
+                } catch (error: Exception) {
+                    throw uplinkFailure.get() ?: error
+                }
                 output.write(packet)
             }
         } finally {
@@ -132,7 +170,8 @@ class YukiVpnService : VpnService() {
         tunnelInterface = null
     }
 
-    private fun fail(message: String) {
+    private fun fail(message: String, throwable: Throwable? = null) {
+        AppLogger.error(message, throwable)
         publish(TunnelStatus.FAILED, message)
         updateNotification(message)
         stopForeground(STOP_FOREGROUND_DETACH)
@@ -140,6 +179,7 @@ class YukiVpnService : VpnService() {
     }
 
     private fun publish(status: TunnelStatus, detail: String) {
+        if (status != TunnelStatus.FAILED) AppLogger.info("${status.name}: $detail")
         sendBroadcast(
             Intent(ACTION_STATUS)
                 .setPackage(packageName)

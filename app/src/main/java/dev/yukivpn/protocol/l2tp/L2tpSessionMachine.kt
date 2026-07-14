@@ -18,6 +18,8 @@ class L2tpSessionMachine(
         private set
     var remoteSessionId: Int? = null
         private set
+    var closeReason: String? = null
+        private set
 
     private var nextNs = 0
     private var nextNr = 0
@@ -49,17 +51,19 @@ class L2tpSessionMachine(
         if (packet.tunnelId != 0) {
             require(packet.tunnelId == localTunnelId) { "Packet addressed to another tunnel" }
         }
-        nextNr = (packet.ns + 1) and 0xffff
-        return when (packet.messageType) {
-            null -> emptyList()
+        val messageType = packet.messageType ?: return emptyList()
+        if (packet.ns != nextNr) return listOf(zeroLengthAck())
+        nextNr = (nextNr + 1) and 0xffff
+        return when (messageType) {
             MessageType.SCCRP -> if (state == State.WAIT_SCCRP) onSccrp(packet) else emptyList()
             MessageType.ICRP -> if (state == State.WAIT_ICRP) onIcrp(packet) else emptyList()
             MessageType.HELLO -> listOf(zeroLengthAck())
             MessageType.STOP_CCN, MessageType.CDN -> {
+                closeReason = describeClose(messageType, packet)
                 state = State.CLOSED
                 emptyList()
             }
-            else -> emptyList()
+            else -> listOf(zeroLengthAck())
         }
     }
 
@@ -69,6 +73,14 @@ class L2tpSessionMachine(
             tunnelId = requireNotNull(remoteTunnelId),
             sessionId = requireNotNull(remoteSessionId),
             payload = payload,
+        )
+    }
+
+    fun hello(): Outbound {
+        check(state == State.ESTABLISHED) { "L2TP call session is not established" }
+        return outbound(
+            tunnelId = requireNotNull(remoteTunnelId),
+            avps = listOf(shortAvp(AvpType.MESSAGE_TYPE, MessageType.HELLO)),
         )
     }
 
@@ -131,6 +143,35 @@ class L2tpSessionMachine(
         .firstOrNull { it.vendorId == 0 && it.type == type }
         ?.unsignedShort()
         ?: error("L2TP message is missing required AVP $type")
+
+    private fun describeClose(messageType: Int, packet: L2tpPacket): String {
+        val kind = if (messageType == MessageType.CDN) "CDN" else "StopCCN"
+        val result = packet.avps.firstOrNull { it.vendorId == 0 && it.type == AvpType.RESULT_CODE }?.value
+        val cause = packet.avps.firstOrNull { it.vendorId == 0 && it.type == AvpType.CAUSE_CODE }?.value
+        return buildString {
+            append(kind)
+            if (result != null && result.size >= 2) {
+                val resultCode = unsignedShort(result, 0)
+                val errorCode = result.takeIf { it.size >= 4 }?.let { unsignedShort(it, 2) }
+                val messageOffset = if (errorCode == null) 2 else 4
+                val message = result.copyOfRange(messageOffset, result.size).toString(Charsets.UTF_8).trim()
+                append(" result=").append(resultCode)
+                if (errorCode != null) append(" error=").append(errorCode)
+                if (message.isNotEmpty()) append(" message=").append(message)
+            }
+            if (cause != null && cause.size >= 3) {
+                append(" cause=").append(unsignedShort(cause, 0))
+                append(" causeMessage=").append(cause[2].toInt() and 0xff)
+                val diagnostic = cause.copyOfRange(3, cause.size).toString(Charsets.UTF_8).trim()
+                if (diagnostic.isNotEmpty()) append(" diagnostic=").append(diagnostic)
+            }
+            append(" avps=")
+            append(packet.avps.joinToString(prefix = "[", postfix = "]") { "${it.vendorId}:${it.type}/${it.value.size}" })
+        }
+    }
+
+    private fun unsignedShort(value: ByteArray, offset: Int): Int =
+        ByteBuffer.wrap(value, offset, 2).order(ByteOrder.BIG_ENDIAN).short.toInt() and 0xffff
 
     private fun shortAvp(type: Int, value: Int) = L2tpAvp(
         type,

@@ -15,6 +15,16 @@ import java.util.concurrent.TimeUnit
 
 class L2tpConnectionIntegrationTest {
     @Test
+    fun `only forwards valid IPv4 packets through IPCP`() {
+        val ipv4 = ByteArray(20).also { it[0] = 0x45 }
+        val ipv6 = ByteArray(40).also { it[0] = 0x60 }
+
+        assertEquals(true, L2tpConnection.isIpv4Packet(ipv4))
+        assertEquals(false, L2tpConnection.isIpv4Packet(ipv6))
+        assertEquals(false, L2tpConnection.isIpv4Packet(byteArrayOf(0x45)))
+    }
+
+    @Test
     fun `negotiates L2TP PAP and IPCP over UDP`() {
         DatagramSocket(0).use { server ->
             server.soTimeout = 5_000
