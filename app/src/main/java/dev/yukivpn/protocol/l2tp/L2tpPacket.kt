@@ -97,11 +97,20 @@ object AvpType {
     const val HOST_NAME = 7
     const val ASSIGNED_TUNNEL_ID = 9
     const val RECEIVE_WINDOW_SIZE = 10
+    const val ASSIGNED_SESSION_ID = 14
+    const val CALL_SERIAL_NUMBER = 15
+    const val FRAMING_TYPE = 19
+    const val TX_CONNECT_SPEED = 24
 }
 
 object MessageType {
     const val SCCRQ = 1
     const val SCCRP = 2
     const val SCCCN = 3
+    const val STOP_CCN = 4
+    const val HELLO = 6
+    const val ICRQ = 10
+    const val ICRP = 11
+    const val ICCN = 12
+    const val CDN = 14
 }
-

@@ -97,7 +97,13 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun stopForProfileChange() {
-        if (status.value == TunnelStatus.PROBING || status.value == TunnelStatus.CONTROL_CONNECTED) {
+        if (status.value in setOf(
+                TunnelStatus.PROBING,
+                TunnelStatus.CONTROL_CONNECTED,
+                TunnelStatus.AUTHENTICATING,
+                TunnelStatus.CONNECTED,
+            )
+        ) {
             stopTunnelService()
         }
         status.value = TunnelStatus.IDLE

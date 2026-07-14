@@ -208,7 +208,12 @@ private fun OverviewScreen(
     onOpenProfiles: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val busy = status == TunnelStatus.PROBING || status == TunnelStatus.CONTROL_CONNECTED
+    val busy = status in setOf(
+        TunnelStatus.PROBING,
+        TunnelStatus.CONTROL_CONNECTED,
+        TunnelStatus.AUTHENTICATING,
+        TunnelStatus.CONNECTED,
+    )
     Column(
         modifier = modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(20.dp),
@@ -243,7 +248,7 @@ private fun OverviewScreen(
                 Icon(Icons.Default.PlayArrow, contentDescription = null)
             }
             Text(
-                if (status == TunnelStatus.PROBING) "正在探测" else "探测 L2TP 服务",
+                if (status == TunnelStatus.PROBING) "正在连接" else "连接",
                 modifier = Modifier.padding(start = 8.dp),
             )
         }
@@ -263,7 +268,7 @@ private fun OverviewScreen(
             shape = RoundedCornerShape(8.dp),
         ) {
             Text(
-                "当前版本仅验证 L2TP 控制通道，尚未启用 IPsec 与 PPP。",
+                "已支持明文 L2TP + PPP 数据隧道。填写 PSK 的配置会等待 IPsec 支持，绝不会自动降级为明文。",
                 modifier = Modifier.padding(14.dp),
                 style = MaterialTheme.typography.bodySmall,
             )
@@ -504,7 +509,7 @@ private fun ProfileEditorDialog(
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
                 )
                 SecretField("密码", password, passwordVisible, { password = it }, { passwordVisible = !passwordVisible })
-                SecretField("IPsec 预共享密钥", psk, pskVisible, { psk = it }, { pskVisible = !pskVisible })
+                SecretField("IPsec 预共享密钥（开发中）", psk, pskVisible, { psk = it }, { pskVisible = !pskVisible })
                 validation?.let {
                     Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                 }
@@ -547,25 +552,30 @@ private fun StatusPanel(status: TunnelStatus, detail: String) {
     val label = when (status) {
         TunnelStatus.IDLE -> "未连接"
         TunnelStatus.PROBING -> "协商中"
-        TunnelStatus.CONTROL_CONNECTED -> "控制通道可达"
+        TunnelStatus.CONTROL_CONNECTED -> "L2TP 会话已建立"
+        TunnelStatus.AUTHENTICATING -> "正在认证"
+        TunnelStatus.CONNECTED -> "已连接"
         TunnelStatus.FAILED -> "连接失败"
     }
     val accent = when (status) {
         TunnelStatus.IDLE -> colors.outline
         TunnelStatus.PROBING -> colors.tertiary
-        TunnelStatus.CONTROL_CONNECTED -> colors.primary
+        TunnelStatus.CONTROL_CONNECTED, TunnelStatus.AUTHENTICATING -> colors.tertiary
+        TunnelStatus.CONNECTED -> colors.primary
         TunnelStatus.FAILED -> colors.error
     }
     val container = when (status) {
         TunnelStatus.IDLE -> colors.surfaceVariant
         TunnelStatus.PROBING -> colors.tertiaryContainer
-        TunnelStatus.CONTROL_CONNECTED -> colors.primaryContainer
+        TunnelStatus.CONTROL_CONNECTED, TunnelStatus.AUTHENTICATING -> colors.tertiaryContainer
+        TunnelStatus.CONNECTED -> colors.primaryContainer
         TunnelStatus.FAILED -> colors.errorContainer
     }
     val onContainer = when (status) {
         TunnelStatus.IDLE -> colors.onSurfaceVariant
         TunnelStatus.PROBING -> colors.onTertiaryContainer
-        TunnelStatus.CONTROL_CONNECTED -> colors.onPrimaryContainer
+        TunnelStatus.CONTROL_CONNECTED, TunnelStatus.AUTHENTICATING -> colors.onTertiaryContainer
+        TunnelStatus.CONNECTED -> colors.onPrimaryContainer
         TunnelStatus.FAILED -> colors.onErrorContainer
     }
     OutlinedCard(
@@ -579,7 +589,7 @@ private fun StatusPanel(status: TunnelStatus, detail: String) {
         ) {
             Surface(color = accent, shape = CircleShape) {
                 Box(Modifier.size(42.dp), contentAlignment = Alignment.Center) {
-                    if (status == TunnelStatus.PROBING) {
+                    if (status == TunnelStatus.PROBING || status == TunnelStatus.AUTHENTICATING) {
                         CircularProgressIndicator(modifier = Modifier.size(22.dp), color = container, strokeWidth = 2.dp)
                     } else {
                         Icon(Icons.Default.Lock, contentDescription = null, tint = container)
