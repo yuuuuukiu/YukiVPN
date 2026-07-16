@@ -2,6 +2,8 @@ package dev.yukivpn.ui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -9,6 +11,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -24,18 +27,25 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.FileOpen
+import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.NotificationsOff
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.QrCode2
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Visibility
@@ -69,12 +79,15 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -85,6 +98,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import dev.yukivpn.data.VpnProfile
 import dev.yukivpn.data.VpnProtocol
+import dev.yukivpn.data.ProfileExchangeCodec
 import dev.yukivpn.BuildConfig
 import dev.yukivpn.R
 import dev.yukivpn.data.isValidIpv4Address
@@ -110,14 +124,22 @@ fun YukiVpnApp(
     logs: StateFlow<List<LogEntry>>,
     blockCaptivePortalNotifications: StateFlow<Boolean>,
     notificationListenerGranted: StateFlow<Boolean>,
+    importStatus: StateFlow<String?>,
+    importedProfileDraft: StateFlow<VpnProfile?>,
     onConnect: () -> Unit,
     onStop: () -> Unit,
     onSaveProfile: (VpnProfile) -> Unit,
     onSelectProfile: (String) -> Unit,
     onDeleteProfile: (String) -> Unit,
+    onImportFile: () -> Unit,
+    onImportUrl: (String) -> Unit,
+    onScanQr: () -> Unit,
+    onDismissImportStatus: () -> Unit,
+    onDiscardImportedProfile: () -> Unit,
     onClearLogs: () -> Unit,
     onSetCaptivePortalBlocking: (Boolean) -> Unit,
     onOpenNotificationAccess: () -> Unit,
+    onOpenUrl: (String) -> Unit,
 ) {
     val profileList by profiles.collectAsState()
     val activeId by activeProfileId.collectAsState()
@@ -126,11 +148,22 @@ fun YukiVpnApp(
     val logEntries by logs.collectAsState()
     val captivePortalBlocking by blockCaptivePortalNotifications.collectAsState()
     val listenerGranted by notificationListenerGranted.collectAsState()
+    val importMessage by importStatus.collectAsState()
+    val importedDraft by importedProfileDraft.collectAsState()
     val activeProfile = profileList.firstOrNull { it.id == activeId }
     var page by remember { mutableStateOf(AppPage.OVERVIEW) }
     var editingProfile by remember { mutableStateOf<VpnProfile?>(null) }
     var showEditor by remember { mutableStateOf(false) }
     var deletingProfile by remember { mutableStateOf<VpnProfile?>(null) }
+    var showUrlImport by remember { mutableStateOf(false) }
+    var qrProfile by remember { mutableStateOf<VpnProfile?>(null) }
+
+    LaunchedEffect(importedDraft?.id) {
+        importedDraft?.let {
+            editingProfile = it
+            showEditor = true
+        }
+    }
 
     BackHandler(enabled = page == AppPage.SETTINGS || page == AppPage.ABOUT) {
         page = AppPage.OVERVIEW
@@ -233,7 +266,11 @@ fun YukiVpnApp(
                         onSelect = onSelectProfile,
                         onEdit = { editingProfile = it; showEditor = true },
                         onDelete = { deletingProfile = it },
+                        onShowQr = { qrProfile = it },
                         onAdd = { editingProfile = null; showEditor = true },
+                        onImportFile = onImportFile,
+                        onImportUrl = { showUrlImport = true },
+                        onScanQr = onScanQr,
                         modifier = Modifier.widthIn(max = 680.dp).fillMaxWidth(),
                     )
                     AppPage.LOGS -> LogsScreen(
@@ -248,6 +285,7 @@ fun YukiVpnApp(
                         modifier = Modifier.widthIn(max = 680.dp).fillMaxWidth(),
                     )
                     AppPage.ABOUT -> AboutScreen(
+                        onOpenUrl = onOpenUrl,
                         modifier = Modifier.widthIn(max = 680.dp).fillMaxWidth(),
                     )
                 }
@@ -257,7 +295,11 @@ fun YukiVpnApp(
         if (showEditor) {
             ProfileEditorDialog(
                 profile = editingProfile,
-                onDismiss = { showEditor = false },
+                imported = editingProfile?.id == importedDraft?.id,
+                onDismiss = {
+                    if (editingProfile?.id == importedDraft?.id) onDiscardImportedProfile()
+                    showEditor = false
+                },
                 onSave = {
                     onSaveProfile(it)
                     showEditor = false
@@ -278,13 +320,34 @@ fun YukiVpnApp(
                 dismissButton = { TextButton(onClick = { deletingProfile = null }) { Text("取消") } },
             )
         }
+        if (showUrlImport) {
+            UrlImportDialog(
+                onDismiss = { showUrlImport = false },
+                onImport = {
+                    showUrlImport = false
+                    onImportUrl(it)
+                },
+            )
+        }
+        qrProfile?.let { profile ->
+            ProfileQrDialog(profile = profile, onDismiss = { qrProfile = null })
+        }
+        importMessage?.let { message ->
+            AlertDialog(
+                onDismissRequest = onDismissImportStatus,
+                icon = { Icon(Icons.Default.Description, contentDescription = null) },
+                title = { Text(if (message.startsWith("正在")) "导入配置" else "导入结果") },
+                text = { Text(message) },
+                confirmButton = { TextButton(onClick = onDismissImportStatus) { Text("确定") } },
+            )
+        }
     }
 }
 
 @Composable
-private fun AboutScreen(modifier: Modifier = Modifier) {
+private fun AboutScreen(onOpenUrl: (String) -> Unit, modifier: Modifier = Modifier) {
     Column(
-        modifier = modifier.fillMaxSize().padding(horizontal = 24.dp, vertical = 48.dp),
+        modifier = modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 32.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
@@ -304,6 +367,31 @@ private fun AboutScreen(modifier: Modifier = Modifier) {
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+        Text("作者", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        Text(
+            "yuuuuukiu · GitHub @yuuuuukiu",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        OutlinedButton(
+            onClick = { onOpenUrl("https://github.com/yuuuuukiu") },
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(8.dp),
+        ) {
+            Icon(Icons.Default.Person, contentDescription = null)
+            Text("GitHub 主页", modifier = Modifier.padding(horizontal = 8.dp).weight(1f))
+            Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null)
+        }
+        OutlinedButton(
+            onClick = { onOpenUrl("https://github.com/yuuuuukiu/YukiVPN") },
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(8.dp),
+        ) {
+            Icon(Icons.Default.Code, contentDescription = null)
+            Text("YukiVPN 项目仓库", modifier = Modifier.padding(horizontal = 8.dp).weight(1f))
+            Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null)
+        }
     }
 }
 
@@ -561,15 +649,13 @@ private fun ProfilesScreen(
     onSelect: (String) -> Unit,
     onEdit: (VpnProfile) -> Unit,
     onDelete: (VpnProfile) -> Unit,
+    onShowQr: (VpnProfile) -> Unit,
     onAdd: () -> Unit,
+    onImportFile: () -> Unit,
+    onImportUrl: () -> Unit,
+    onScanQr: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    if (profiles.isEmpty()) {
-        Box(modifier.fillMaxSize().padding(20.dp), contentAlignment = Alignment.Center) {
-            EmptyProfiles(onAdd)
-        }
-        return
-    }
     LazyColumn(
         modifier = modifier.fillMaxSize(),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(
@@ -582,11 +668,25 @@ private fun ProfilesScreen(
     ) {
         item {
             Text(
-                "${profiles.size} 个本地配置 · 点按即可切换",
+                if (profiles.isEmpty()) "导入或创建配置" else "${profiles.size} 个本地配置 · 点按即可切换",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(bottom = 6.dp),
             )
+        }
+        item {
+            ProfileImportActions(
+                onImportFile = onImportFile,
+                onImportUrl = onImportUrl,
+                onScanQr = onScanQr,
+            )
+        }
+        if (profiles.isEmpty()) {
+            item {
+                Box(Modifier.fillMaxWidth().padding(vertical = 48.dp), contentAlignment = Alignment.Center) {
+                    EmptyProfiles(onAdd)
+                }
+            }
         }
         items(profiles, key = { it.id }) { profile ->
             ProfileListItem(
@@ -594,6 +694,7 @@ private fun ProfilesScreen(
                 selected = profile.id == activeId,
                 onSelect = { onSelect(profile.id) },
                 onEdit = { onEdit(profile) },
+                onShowQr = { onShowQr(profile) },
                 onDelete = { onDelete(profile) },
             )
         }
@@ -606,6 +707,7 @@ private fun ProfileListItem(
     selected: Boolean,
     onSelect: () -> Unit,
     onEdit: () -> Unit,
+    onShowQr: () -> Unit,
     onDelete: () -> Unit,
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
@@ -647,6 +749,11 @@ private fun ProfileListItem(
                         onClick = { menuExpanded = false; onEdit() },
                     )
                     DropdownMenuItem(
+                        text = { Text("显示二维码") },
+                        leadingIcon = { Icon(Icons.Default.QrCode2, contentDescription = null) },
+                        onClick = { menuExpanded = false; onShowQr() },
+                    )
+                    DropdownMenuItem(
                         text = { Text("删除") },
                         leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null) },
                         onClick = { menuExpanded = false; onDelete() },
@@ -655,6 +762,100 @@ private fun ProfileListItem(
             }
         }
     }
+}
+
+@Composable
+private fun ProfileImportActions(
+    onImportFile: () -> Unit,
+    onImportUrl: () -> Unit,
+    onScanQr: () -> Unit,
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = onImportFile, modifier = Modifier.weight(1f), shape = RoundedCornerShape(8.dp)) {
+                Icon(Icons.Default.FileOpen, contentDescription = null)
+                Text("从文件", modifier = Modifier.padding(start = 8.dp))
+            }
+            OutlinedButton(onClick = onImportUrl, modifier = Modifier.weight(1f), shape = RoundedCornerShape(8.dp)) {
+                Icon(Icons.Default.Link, contentDescription = null)
+                Text("从 URL", modifier = Modifier.padding(start = 8.dp))
+            }
+        }
+        FilledTonalButton(onClick = onScanQr, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(8.dp)) {
+            Icon(Icons.Default.QrCodeScanner, contentDescription = null)
+            Text("扫描二维码", modifier = Modifier.padding(start = 8.dp))
+        }
+    }
+}
+
+@Composable
+private fun UrlImportDialog(onDismiss: () -> Unit, onImport: (String) -> Unit) {
+    var url by remember { mutableStateOf("") }
+    var validation by remember { mutableStateOf<String?>(null) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Default.Link, contentDescription = null) },
+        title = { Text("从 URL 导入") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = url,
+                    onValueChange = { url = it; validation = null },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("HTTPS 配置地址") },
+                    placeholder = { Text("https://example.com/profile.json") },
+                    singleLine = true,
+                    shape = RoundedCornerShape(8.dp),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done),
+                )
+                validation?.let {
+                    Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                validation = if (url.trim().startsWith("https://", ignoreCase = true)) null else "请输入 HTTPS 地址"
+                if (validation == null) onImport(url.trim())
+            }) { Text("导入") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
+}
+
+@Composable
+private fun ProfileQrDialog(profile: VpnProfile, onDismiss: () -> Unit) {
+    val payload = remember(profile) { ProfileExchangeCodec.encode(profile) }
+    val qrCode = remember(payload) { runCatching { createQrCode(payload) } }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Default.QrCode2, contentDescription = null) },
+        title = { Text(profile.name) },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                qrCode.getOrNull()?.let { bitmap ->
+                    Image(
+                        bitmap = bitmap.asImageBitmap(),
+                        contentDescription = "${profile.name} 配置二维码",
+                        modifier = Modifier.fillMaxWidth().aspectRatio(1f).background(Color.White).padding(12.dp),
+                    )
+                } ?: Text("无法生成二维码：${qrCode.exceptionOrNull()?.message.orEmpty()}")
+                Text(
+                    "二维码仅包含服务器、协议、端口和 DNS，不包含账号、密码或 PSK。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+    )
 }
 
 @Composable
@@ -686,6 +887,7 @@ private fun EmptyProfiles(onAdd: () -> Unit) {
 @Composable
 private fun ProfileEditorDialog(
     profile: VpnProfile?,
+    imported: Boolean = false,
     onDismiss: () -> Unit,
     onSave: (VpnProfile) -> Unit,
 ) {
@@ -705,12 +907,19 @@ private fun ProfileEditorDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = { Icon(if (profile == null) Icons.Default.Add else Icons.Default.Edit, contentDescription = null) },
-        title = { Text(if (profile == null) "添加配置" else "编辑配置") },
+        title = { Text(if (imported) "完成导入" else if (profile == null) "添加配置" else "编辑配置") },
         text = {
             Column(
                 modifier = Modifier.fillMaxWidth().heightIn(max = 500.dp).verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
+                if (imported) {
+                    Text(
+                        "可传递配置不包含账号、密码或 PSK，请补全后保存。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
                     VpnProtocol.entries.forEachIndexed { index, option ->
                         SegmentedButton(
